@@ -399,19 +399,32 @@ status_t EffectConversionHelperAidl::handleSetOffload(uint32_t cmdSize, const vo
               cmdSize, pCmdData, numericPointerToString(replySize).c_str(), pReplyData);
         return BAD_VALUE;
     }
-    effect_offload_param_t* offload = (effect_offload_param_t*)pCmdData;
-    // send to proxy to update active sub-effect
-    if (mIsProxyEffect) {
+    const auto* offload = static_cast<const effect_offload_param_t*>(pCmdData);
+    const auto effectProxy = mIsProxyEffect ? std::static_pointer_cast<EffectProxy>(mEffect)
+                                            : nullptr;
+    if (effectProxy) {
         ALOGV("%s offload param offload %s ioHandle %d", __func__,
               offload->isOffload ? "true" : "false", offload->ioHandle);
-        const auto& effectProxy = std::static_pointer_cast<EffectProxy>(mEffect);
         RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(effectProxy->setOffloadParam(offload)));
-        if (mCommon.ioHandle != offload->ioHandle) {
-            ALOGV("%s ioHandle update [%d to %d]", __func__, mCommon.ioHandle, offload->ioHandle);
-            mCommon.ioHandle = offload->ioHandle;
-            Parameter aidlParam = UNION_MAKE(Parameter, common, mCommon);
+    }
+
+    // A tunneled effect needs the new I/O handle when AudioFlinger moves its chain.
+    const bool isTunneled = mDesc.common.flags.hwAcceleratorMode ==
+            Flags::HardwareAccelerator::TUNNEL;
+    if (mCommon.ioHandle != offload->ioHandle && (effectProxy || isTunneled)) {
+        ALOGV("%s ioHandle update [%d to %d]", __func__, mCommon.ioHandle, offload->ioHandle);
+        auto common = mCommon;
+        common.ioHandle = offload->ioHandle;
+        State state;
+        RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(mEffect->getState(&state)));
+        if (state != State::INIT) {
+            Parameter aidlParam = UNION_MAKE(Parameter, common, common);
             RETURN_STATUS_IF_ERROR(statusTFromBinderStatus(mEffect->setParameter(aidlParam)));
         }
+        mCommon = common;
+    }
+
+    if (effectProxy) {
         // update FMQs if the effect instance already open
         if (State state; effectProxy->getState(&state).isOk() && state != State::INIT) {
             IEffect::OpenEffectReturn openReturn;
